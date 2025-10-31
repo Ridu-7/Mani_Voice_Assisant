@@ -1,0 +1,20 @@
+import pyttsx3
+import speech_recognition as sr
+import webbrowser
+import datetime
+import pywhatkit
+import json
+import time
+import threading
+import numpy as np
+import re
+import os
+import hashlib
+import logging
+from pathlib import Path
+from cryptography.fernet import Fernet
+from langchain_groq import ChatGroq
+from langchain.schema import HumanMessage
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import dateparser
