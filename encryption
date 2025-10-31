@@ -1,0 +1,59 @@
+class SecurityConfig:
+    MAX_TIMER_DURATION = 3600
+    MAX_TASKS = 50
+    MAX_REMINDERS = 30
+    ALLOWED_SITES = {
+        "google": "https://www.google.com",
+        "youtube": "https://www.youtube.com",
+        "gmail": "https://mail.google.com",
+        "github": "https://github.com",
+        "stackoverflow": "https://stackoverflow.com"
+    }
+    MAX_COMMAND_LENGTH = 500
+    MAX_BEHAVIOR_LOG = 100
+
+
+
+class SecureConfig:
+    def __init__(self):
+        self.config_dir = Path.home() / ".mani"
+        self.config_dir.mkdir(exist_ok=True)
+        self.key_file = self.config_dir / "key.key"
+        self.config_file = self.config_dir / "config.enc"
+        self.key = self._load_or_create_key()
+        self.cipher = Fernet(self.key)
+
+    def _load_or_create_key(self):
+        if self.key_file.exists():
+            return self.key_file.read_bytes()
+        else:
+            key = Fernet.generate_key()
+            self.key_file.write_bytes(key)
+            os.chmod(self.key_file, 0o600)
+            return key
+
+    def save_config(self, config_data):
+        try:
+            encrypted_data = self.cipher.encrypt(json.dumps(config_data).encode())
+            self.config_file.write_bytes(encrypted_data)
+            os.chmod(self.config_file, 0o600)
+        except Exception as e:
+            logging.error(f"Failed to save config: {e}")
+
+    def load_config(self):
+        try:
+            if self.config_file.exists():
+                encrypted_data = self.config_file.read_bytes()
+                decrypted_data = self.cipher.decrypt(encrypted_data)
+                return json.loads(decrypted_data.decode())
+        except Exception as e:
+            logging.error(f"Failed to load config: {e}")
+
+        return {
+            "tasks": [],
+            "reminders": [],
+            "behavior_log": [],
+            "preferences": {"voice_confirmation": True}
+        }
+
+        return text.strip()
