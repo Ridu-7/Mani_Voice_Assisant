@@ -1,0 +1,438 @@
+class MANI:
+    def __init__(self):
+        self.setup_logging()
+        self.config_manager = SecureConfig()
+        self.user_data = self.config_manager.load_config()
+        self.conversation_context = []
+        self.sanitizer = InputSanitizer()
+        self.engine = pyttsx3.init()
+        self.engine.setProperty('rate', 170)
+        self.engine.setProperty('volume', 1)
+
+        api_key ='groq id'
+
+        self.groq_api = ChatGroq(
+            model_name="llama3-8b-8192",
+            groq_api_key=api_key
+        )
+
+    def setup_logging(self):
+        log_dir = Path.home() / ".jarvis" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_dir / 'jarvis.log'),
+                logging.StreamHandler()
+            ]
+        )
+
+    def speak(self, text, priority=1):
+        text = self.sanitizer.sanitize_text(text)
+        if self.user_data['preferences']['voice_confirmation'] or priority == 0:
+            print(f" JARVIS: {text}")
+            try:
+                self.engine.say(text)
+                self.engine.runAndWait()
+            except Exception as e:
+                logging.error(f"TTS Error: {e}")
+
+    def listen(self):
+        recognizer = sr.Recognizer()
+        with sr.Microphone() as source:
+            print("Kekuren...")
+            recognizer.adjust_for_ambient_noise(source, duration=1)
+            try:
+                audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
+                command = recognizer.recognize_google(audio)
+                return self.sanitizer.sanitize_text(command)
+            except sr.WaitTimeoutError:
+                self.speak("Listening timeout. Please try again.")
+                return None
+            except sr.UnknownValueError:
+                self.speak("Sorry, I didn't catch that.")
+                return None
+            except sr.RequestError as e:
+                logging.error(f"Speech recognition error: {e}")
+                self.speak("Speech recognition service is unavailable.")
+                return None
+
+    def preprocess_text(self, text):
+        text = text.lower()
+        text = re.sub(r'[^\w\s]', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    def compute_embedding_similarity(self, query, history):
+        try:
+            query = self.preprocess_text(query)
+            history = [self.preprocess_text(entry['command']) for entry in history if 'command' in entry]
+
+            if not history:
+                return None
+
+            vectorizer = TfidfVectorizer()
+            vectors = vectorizer.fit_transform([query] + history)
+            query_vec, history_vecs = vectors[0], vectors[1:]
+
+            similarities = cosine_similarity(query_vec, history_vecs).flatten()
+            most_similar_idx = np.argmax(similarities)
+
+            return history[most_similar_idx] if max(similarities) > 0.7 else None
+        except Exception as e:
+            logging.error(f"Similarity computation error: {e}")
+            return None
+
+    def get_personalized_response(self, query):
+        if not self.user_data['behavior_log']:
+            return None
+
+        most_similar = self.compute_embedding_similarity(query, self.user_data['behavior_log'])
+        return f"Based on your previous request, would you like me to {most_similar}?" if most_similar else None
+
+    def parse_command(self, command):
+        try:
+            command = self.sanitizer.sanitize_text(command)
+
+
+            music_keywords = ['play', 'song', 'music', 'track', 'artist', 'album']
+            if any(keyword in command.lower() for keyword in music_keywords):
+
+                for keyword in ['play ', 'song ', 'music ']:
+                    if keyword in command.lower():
+                        song_name = command.lower().split(keyword, 1)[-1].strip()
+                        if song_name:
+                            return {
+                                "intent": "play",
+                                "action": "execute",
+                                "target": song_name,
+                                "time": None,
+                                "context": "music"
+                            }
+
+            response = self.groq_api.invoke([HumanMessage(
+                content=f"""Analyze this command and return ONLY valid JSON:
+                {{
+                    "intent": "task|reminder|play|query|control|timer|code",
+                    "action": "add|remove|show|execute|set|open|generate",
+                    "target": "specific object",
+                    "time": "parsed time or null",
+                    "context": "key phrases"
+                }}
+
+                Special rules:
+                - If command contains "play", "song", "music" + song name, use intent "play"
+                - If asking for code/programming, use intent "code"
+                - For general questions/information, use intent "query"
+
+                Command: {command}"""
+            )]).content
+
+            cleaned_response = response.strip().strip('```json').strip('```').strip()
+            return json.loads(cleaned_response)
+
+        except json.JSONDecodeError as e:
+            logging.error(f"NLU JSON Decode Error: {e}")
+            return {"intent": "unknown"}
+        except Exception as e:
+            logging.error(f"NLU Error: {e}")
+            return {"intent": "unknown"}
+
+    def play_song(self, song_name):
+        """Search and play a song on YouTube with enhanced feedback."""
+        song_name = self.sanitizer.sanitize_text(song_name)
+        if not song_name:
+            self.speak("Invalid song name.")
+            return
+
+        try:
+            print(f"\n Playing: {song_name}")
+            print("=" * 50)
+            self.speak(f"Searching and playing {song_name} on YouTube...")
+
+            # Play the song on YouTube
+            pywhatkit.playonyt(song_name)
+
+            print(f" Successfully opened YouTube for: {song_name}")
+            print("=" * 50 + "\n")
+
+            time.sleep(2)  # Give time for browser to load
+            self.speak(f"Now playing {song_name}. Enjoy!")
+
+        except Exception as e:
+            logging.error(f"YouTube play error: {e}")
+            print(f" Error playing song: {e}")
+            self.speak("Sorry, I couldn't play that song. Please check your internet connection.")
+
+    def open_website(self, site_name):
+        site_name = site_name.lower().strip()
+
+        if site_name in SecurityConfig.ALLOWED_SITES:
+            try:
+                self.speak(f"Opening {site_name}...")
+                webbrowser.open(SecurityConfig.ALLOWED_SITES[site_name])
+            except Exception as e:
+                logging.error(f"Website open error: {e}")
+                self.speak("Sorry, I couldn't open that website.")
+        else:
+            self.speak(f"Sorry, {site_name} is not in my allowed websites list for security reasons.")
+
+    def set_timer(self, duration_str, message="Time's up!"):
+
+        if not self.sanitizer.validate_timer_duration(duration_str):
+            self.speak("Invalid timer duration. Please specify between 1 second and 1 hour.")
+            return
+
+        duration = int(duration_str)
+        message = self.sanitizer.sanitize_text(message)
+
+        def countdown():
+            self.speak(f"Timer set for {duration} seconds.")
+            time.sleep(duration)
+            self.speak(message, priority=0)
+
+        timer_thread = threading.Thread(target=countdown, daemon=True)
+        timer_thread.start()
+
+    def manage_tasks(self, action, target=None):
+        if action == "add" and target:
+            if len(self.user_data['tasks']) >= SecurityConfig.MAX_TASKS:
+                self.speak(f"Task limit reached ({SecurityConfig.MAX_TASKS}). Please remove some tasks first.")
+                return
+
+            target = self.sanitizer.sanitize_text(target)
+            if target and target not in self.user_data['tasks']:
+                self.user_data['tasks'].append(target)
+                self.speak(f"Added task: {target}")
+                self.save_user_data()
+            else:
+                self.speak("Task already exists or is invalid.")
+
+        elif action == "show":
+            if self.user_data['tasks']:
+                tasks = ", ".join(self.user_data['tasks'][:10])  # Limit output
+                self.speak(f"Your current tasks are: {tasks}")
+                if len(self.user_data['tasks']) > 10:
+                    self.speak(f"And {len(self.user_data['tasks']) - 10} more tasks.")
+            else:
+                self.speak("You have no tasks currently.")
+
+        elif action == "remove" and target:
+            target = self.sanitizer.sanitize_text(target)
+            if target in self.user_data['tasks']:
+                self.user_data['tasks'].remove(target)
+                self.speak(f"Removed task: {target}")
+                self.save_user_data()
+            else:
+                self.speak(f"Task '{target}' not found.")
+
+    def manage_reminders(self, action, target=None, time_str=None):
+        if action == "add" and target and time_str:
+            if len(self.user_data['reminders']) >= SecurityConfig.MAX_REMINDERS:
+                self.speak(
+                    f"Reminder limit reached ({SecurityConfig.MAX_REMINDERS}). Please remove some reminders first.")
+                return
+
+            try:
+                target = self.sanitizer.sanitize_text(target)
+                reminder_time = dateparser.parse(time_str)
+
+                if reminder_time and reminder_time > datetime.datetime.now():
+                    self.user_data['reminders'].append({
+                        "text": target,
+                        "time": reminder_time.isoformat()
+                    })
+                    self.speak(f"Set reminder for '{target}' at {reminder_time.strftime('%I:%M %p on %B %d')}.")
+                    self.save_user_data()
+                else:
+                    self.speak("Invalid reminder time. Please specify a future time.")
+            except Exception as e:
+                logging.error(f"Reminder error: {e}")
+                self.speak("Sorry, I couldn't set that reminder.")
+
+        elif action == "show":
+            if self.user_data['reminders']:
+                self.speak("Your current reminders are:")
+                for i, reminder in enumerate(self.user_data['reminders'][:5]):  # Limit output
+                    time_obj = datetime.datetime.fromisoformat(reminder['time'])
+                    self.speak(f"- {reminder['text']} at {time_obj.strftime('%I:%M %p on %B %d')}")
+                if len(self.user_data['reminders']) > 5:
+                    self.speak(f"And {len(self.user_data['reminders']) - 5} more reminders.")
+            else:
+                self.speak("You have no reminders currently.")
+
+    def adaptive_reminders(self):
+        now = datetime.datetime.now()
+        reminders_to_remove = []
+
+        for reminder in self.user_data['reminders']:
+            try:
+                reminder_time = datetime.datetime.fromisoformat(reminder['time'])
+                if reminder_time <= now:
+                    self.speak(f"Reminder: {reminder['text']}", priority=0)
+                    reminders_to_remove.append(reminder)
+            except Exception as e:
+                logging.error(f"Reminder processing error: {e}")
+                reminders_to_remove.append(reminder)
+
+        for reminder in reminders_to_remove:
+            self.user_data['reminders'].remove(reminder)
+
+        if reminders_to_remove:
+            self.save_user_data()
+
+    def log_behavior(self, command, response):
+        log_entry = {
+            "command": self.sanitizer.sanitize_text(command),
+            "response": self.sanitizer.sanitize_text(response),
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+
+        self.user_data['behavior_log'].append(log_entry)
+
+      
+        if len(self.user_data['behavior_log']) > SecurityConfig.MAX_BEHAVIOR_LOG:
+            self.user_data['behavior_log'] = self.user_data['behavior_log'][-SecurityConfig.MAX_BEHAVIOR_LOG:]
+
+        logging.info(f"Command logged: {command[:50]}...")
+        self.save_user_data()
+
+    def save_user_data(self):
+        try:
+            self.config_manager.save_config(self.user_data)
+        except Exception as e:
+            logging.error(f"Failed to save user data: {e}")
+
+    def generate_code(self, command):
+        """Generate code based on user request."""
+        try:
+            command = self.sanitizer.sanitize_text(command)
+            code_keywords = ['code', 'function', 'program', 'script', 'algorithm', 'write', 'create']
+            if not any(keyword in command.lower() for keyword in code_keywords):
+                return False
+
+            self.speak("Generating code...")
+            print("\n" + "=" * 50)
+            print("Generated Code:")
+            print("=" * 50)
+
+            response = self.groq_api.invoke([HumanMessage(
+                content=f"""Generate clean, working Python code for: {command}
+
+                Requirements:
+                1. Provide only the code with minimal comments
+                2. Include a simple example usage
+                3. Make it functional and ready to run
+                4. Keep it concise but complete
+
+                Format the response as clean code without markdown formatting."""
+            )]).content
+            code = response.strip().strip('```python').strip('```').strip()
+            print(code)
+            print("=" * 50 + "\n")
+
+            self.speak("Code generated successfully!")
+            self.log_behavior(command, "Code generated")
+            return True
+
+        except Exception as e:
+            logging.error(f"Code generation error: {e}")
+            self.speak("Sorry, I couldn't generate the code.")
+            return False
+
+    def handle_query(self, command):
+        try:
+            command = self.sanitizer.sanitize_text(command)
+            response = self.groq_api.invoke([HumanMessage(
+                content=f"""You are JARVIS, an intelligent AI assistant. Provide a comprehensive, helpful, and engaging response to this query: {command}
+
+                Guidelines:
+                - Be conversational and friendly
+                - Provide detailed explanations when appropriate
+                - Include relevant examples or context
+                - Be informative like ChatGPT
+                - Keep responses engaging but concise for voice output
+                - If it's a factual question, provide accurate information
+                - If it's a how-to question, give step-by-step guidance
+                - Be helpful and insightful"""
+            )]).content
+
+            response = self.sanitizer.sanitize_text(response)
+            print(f"\n🤖 mani Response:")
+            print("=" * 60)
+            print(response)
+            print("=" * 60 + "\n")
+
+            
+            speech_response = response[:300] + "..." if len(response) > 300 else response
+            self.speak(speech_response)
+            self.log_behavior(command, response)
+
+        except Exception as e:
+            logging.error(f"Query handling error: {e}")
+            self.speak("Sorry, I encountered an error processing your request.")
+
+    def run(self):
+        self.speak("mani Active. How can I assist you today?", priority=0)
+        logging.info("mani started successfully")
+
+        while True:
+            try:
+                command = self.listen()
+                if not command:
+                    continue
+
+                logging.info(f"Command received: {command}")
+                parsed = self.parse_command(command)
+                print(f"🔍 Parsed: {parsed}")
+
+                if parsed['intent'] == "play" and parsed['target']:
+                    self.play_song(parsed['target'])
+
+                elif parsed['intent'] == "control" and parsed['action'] == "open" and parsed['target']:
+                    self.open_website(parsed['target'])
+
+                elif parsed['intent'] == "control" and parsed['action'] == "set" and parsed['target'] == "timer":
+                    if parsed['time']:
+                        self.set_timer(parsed['time'])
+                    else:
+                        self.speak("Please specify a timer duration in seconds.")
+
+                elif parsed['intent'] == "task":
+                    self.manage_tasks(parsed['action'], parsed['target'])
+
+                elif parsed['intent'] == "reminder":
+                    self.manage_reminders(parsed['action'], parsed['target'], parsed['time'])
+
+                elif parsed['intent'] == "code" or self.generate_code(command):
+                    pass
+
+                elif parsed['intent'] == "query":
+                    # Check if it's a code request first
+                    if not self.generate_code(command):
+                        self.handle_query(command)
+
+                else:
+                    if not self.generate_code(command):
+                        self.handle_query(command)
+
+                self.adaptive_reminders()
+
+            except KeyboardInterrupt:
+                self.speak("Goodbye!")
+                logging.info("JARVIS shutdown by user")
+                break
+            except Exception as e:
+                logging.error(f"Unexpected error: {e}")
+                self.speak("I encountered an unexpected error. Please try again.")
+
+
+if __name__ == "__main__":
+    try:
+        jarvis = JARVIS()
+        jarvis.run()
+    except Exception as e:
+        print(f"Failed to start JARVIS: {e}")
+        logging.error(f"Startup error: {e}")
